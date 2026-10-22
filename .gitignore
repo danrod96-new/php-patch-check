@@ -1,0 +1,4 @@
+# Compiled binaries (build from source with the commands in README.md)
+/php_patch_check
+/php_patch_check_notls
+*.o

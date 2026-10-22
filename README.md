@@ -145,3 +145,16 @@ ssh user@your-server 'sh -s' < php_patch_check_server.sh
   limits, or whether mitigations were actually effective.
 - **Not a substitute for updating.** Per the advisory, interim mitigations do
   not make an installation safe. Patch.
+
+---
+
+## License
+
+Copyright (C) 2026 Daniel Rodriguez.
+
+This project is licensed under the **GNU General Public License v3.0 or later**
+(GPL-3.0-or-later). You may redistribute and/or modify it under those terms. It
+is distributed in the hope that it will be useful, but **WITHOUT ANY WARRANTY**;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+PURPOSE. See the [LICENSE](LICENSE) file or <https://www.gnu.org/licenses/> for
+the full text.

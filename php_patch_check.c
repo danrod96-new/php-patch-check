@@ -1,4 +1,13 @@
 /*
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 Daniel Rodriguez
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version. It is distributed WITHOUT ANY WARRANTY. See the LICENSE
+ * file or <https://www.gnu.org/licenses/> for details.
+ *
  * php_patch_check.c
  *
  * Non-destructive patch-status probe for the PHP RCE advisory of 2026-10-21

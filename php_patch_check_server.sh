@@ -1,4 +1,11 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Daniel Rodriguez
+#
+# This program is free software under the GNU General Public License v3 or
+# later. It comes with NO WARRANTY. See the LICENSE file or
+# <https://www.gnu.org/licenses/> for details.
+#
 # php_patch_check_server.sh
 #
 # Run this ON the server (e.g. over SSH) to confirm whether the PHP RCE
