@@ -2,3 +2,4 @@
 /php_patch_check
 /php_patch_check_notls
 *.o
+*.lib
