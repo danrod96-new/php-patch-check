@@ -131,10 +131,20 @@ vendor_backport() {
 check_mitigations() {
     bin=$1 ver=$2
     maj_min=$(printf '%s' "$ver" | cut -d. -f1,2)
-    up=$("$bin" -i 2>/dev/null | awk -F'=>' '/session.upload_progress.enabled/{gsub(/ /,"",$2);print $2;exit}')
+    ini=$("$bin" -i 2>/dev/null)
+    up=$(printf '%s' "$ini" | awk -F'=>' '/session.upload_progress.enabled/{gsub(/ /,"",$2);print $2;exit}')
+    sh=$(printf '%s' "$ini" | awk -F'=>' '/session.serialize_handler/{gsub(/ /,"",$2);print $2;exit}')
     [ -n "$up" ] && echo "  mitig : session.upload_progress.enabled = $up (advisory suggests 0 as interim)"
+    [ -n "$sh" ] && echo "  mitig : session.serialize_handler = $sh"
+    # CVE-2026-115560 (informational): closed when upload progress is off.
+    case "$up" in
+        Off|off|0|"") echo "  mitig : CVE-2026-115560 vector CLOSED (upload progress off)" ;;
+        *)            echo "  mitig : CVE-2026-115560 vector OPEN unless no app switches"
+                      echo "          session.serialize_handler to 'php' at runtime --"
+                      echo "          scan code with scan_serialize_handler.sh" ;;
+    esac
     if [ "$maj_min" = "8.5" ]; then
-        fb=$("$bin" -i 2>/dev/null | awk -F'=>' '/fatal_error_backtraces/{gsub(/ /,"",$2);print $2;exit}')
+        fb=$(printf '%s' "$ini" | awk -F'=>' '/fatal_error_backtraces/{gsub(/ /,"",$2);print $2;exit}')
         [ -n "$fb" ] && echo "  mitig : fatal_error_backtraces = $fb (advisory suggests 0 on 8.5)"
     fi
 }

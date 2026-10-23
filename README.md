@@ -1,9 +1,10 @@
 # PHP RCE Patch-Status Tools — CVE-2026-109618 / CVE-2026-109619
 
-Three small, **read-only** tools to confirm whether your PHP installations are
+Four small, **read-only** tools to confirm whether your PHP installations are
 patched against the critical RCE advisory published **2026-10-21** on
 [php.net](https://www.php.net/archive/2026.php): a remote probe, an on-server
-check, and a no-shell version endpoint.
+check, a no-shell version endpoint, and a source audit for the related
+informational advisory **CVE-2026-115560**.
 
 None of them is an exploit. They do **not** trigger the vulnerabilities and send
 no attack payload — they only read version information. The goal is a clean
@@ -37,6 +38,18 @@ PHP 8.1 and older are end-of-life upstream; minimal source backports exist for
 7.4 / 8.0 / 8.1, and many distributions ship their own backports. **Updating is
 the only complete fix**; the advisory's interim mitigations do not make an
 installation safe.
+
+### Related informational advisory: CVE-2026-115560
+
+A follow-up, lower-severity issue handled in the regular release cycle. It is
+only reachable when **both**: (1) `session.upload_progress.enabled` is On, and
+(2) application code switches `session.serialize_handler` to `"php"` at runtime
+via `ini_set()` before `session_start()`. Condition (2) is application behavior
+that **no remote probe can observe** — the only remote "test" would be to attempt
+the exploit. So this is checked server-side (ini state) plus a source audit
+(the code pattern), not remotely. Interim mitigation: set
+`session.upload_progress.enabled=0` (the same setting from the Oct 21 advisory —
+if you set it then, you are already covered).
 
 ---
 
@@ -104,7 +117,25 @@ curl "https://example.com/vulncheck.php?token=YOUR_TOKEN"
 
 It reports `PHP_VERSION` (the upstream string), so a vendor backport may still
 read `VULNERABLE_BY_VERSION` — confirm the package version with your vendor if
-so.
+so. It also reports `session.upload_progress.enabled`, `session.serialize_handler`,
+and a `CVE-2026-115560` mitigation line.
+
+### 4. `scan_serialize_handler.sh` — CVE-2026-115560 source audit
+
+Greps your PHP source for the one code pattern that makes the informational
+advisory reachable: a runtime `ini_set('session.serialize_handler', 'php')`
+(the dangerous switch), plus any other runtime change of that handler as
+context. Read-only.
+
+```bash
+sh scan_serialize_handler.sh /path/to/your/app   # default: current dir
+```
+
+Exit `1` if the high-risk switch is found, else `0`. A grep can't prove
+exploitability (control flow, config, and whether upload progress is on all
+matter), so treat `[HIGH]` hits as "review these." The simplest fix is still
+`session.upload_progress.enabled=0`. (`php_patch_check_server.sh` also reports
+whether that mitigation is in place.)
 
 ---
 

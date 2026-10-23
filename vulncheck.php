@@ -62,9 +62,22 @@ if (isset($fixes[$branch])) {
     $verdict = 'UNKNOWN_BRANCH';
 }
 
-// Machine-readable marker line that php_patch_check parses:
-printf("PHPVULNCHECK version=%s branch=%s verdict=%s sapi=%s\n",
-       PHP_VERSION, $branch, $verdict, PHP_SAPI);
+// CVE-2026-115560 (informational): the interim mitigation is to disable
+// session upload progress. It is only exploitable if an app also switches
+// session.serialize_handler to "php" at runtime before session_start() -- which
+// cannot be seen from here, so we report the ini state and leave the code check
+// to scan_serialize_handler.sh.
+$upb = ini_get('session.upload_progress.enabled');       // bool-ish
+$sh  = ini_get('session.serialize_handler');             // string
+$mitigated_115560 = ($upb === false) ? 'UNKNOWN' : ($upb ? 'NO' : 'YES');
+
+// Machine-readable marker line that php_patch_check parses (extra fields are
+// ignored by older versions of the tool):
+printf("PHPVULNCHECK version=%s branch=%s verdict=%s sapi=%s upload_progress=%s serialize_handler=%s mitig115560=%s\n",
+       PHP_VERSION, $branch, $verdict, PHP_SAPI,
+       ($upb === false ? 'na' : ($upb ? 'on' : 'off')),
+       ($sh === false || $sh === '' ? 'na' : $sh),
+       $mitigated_115560);
 
 // Human-readable detail (ignored by the tool).
 echo "----\n";
@@ -74,12 +87,18 @@ echo "Branch fix  : " . (isset($fixes[$branch]) ? "$branch.{$fixes[$branch]}" : 
 echo "Verdict     : $verdict\n";
 
 // Advisory interim-mitigation settings, for context.
-$up = ini_get('session.upload_progress.enabled');
-echo "session.upload_progress.enabled : " . ($up === false ? 'n/a' : ($up ? 'On' : 'Off')) . "\n";
+echo "session.upload_progress.enabled : " . ($upb === false ? 'n/a' : ($upb ? 'On' : 'Off')) . "\n";
+echo "session.serialize_handler       : " . ($sh === false || $sh === '' ? 'n/a' : $sh) . "\n";
 if ($branch === '8.5') {
     $fb = ini_get('fatal_error_backtraces');
     echo "fatal_error_backtraces          : " . ($fb === false ? 'n/a' : ($fb ? 'On' : 'Off')) . "\n";
 }
+echo "----\n";
+echo "CVE-2026-115560 (informational): mitigated here = $mitigated_115560\n";
+echo "  YES  = upload progress is Off, so the vector is closed.\n";
+echo "  NO   = upload progress is On; you are only exposed if an app switches\n";
+echo "         session.serialize_handler to 'php' at runtime before session_start().\n";
+echo "         Run scan_serialize_handler.sh over your code to check that pattern.\n";
 echo "----\n";
 echo "Reminder: delete this file from the server when you are done.\n";
 echo "If VULNERABLE_BY_VERSION, confirm against your vendor's backport before acting.\n";
