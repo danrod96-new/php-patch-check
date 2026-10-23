@@ -13,31 +13,40 @@
  * Non-destructive patch-status probe for the PHP RCE advisory of 2026-10-21
  * (CVE-2026-109618 / CVE-2026-109619).
  *
- * It does ONE harmless HTTP request per URL, reads the PHP version the server
- * advertises in its response headers (X-Powered-By / Server), and compares it
- * against the first patched release of each branch:
+ * It does ONE harmless HTTP GET per URL and reports patch status against the
+ * first patched release of each branch:
  *
  *     8.5 -> 8.5.12   8.4 -> 8.4.27   8.3 -> 8.3.36   8.2 -> 8.2.35
  *
- * It sends no payload and triggers neither bug. It only reads version banners.
+ * For each URL it tries three sources, in order:
+ *   1. ENDPOINT  -- a vulncheck.php marker in the response body (authoritative;
+ *                   the no-shell method: deploy vulncheck.php, point the tool at
+ *                   it with its ?token=..., read the real running version).
+ *   2. HEADER    -- the version advertised in X-Powered-By / Server.
+ *   3. FINGERPRINT when neither is available: it reports passive signals
+ *                   (PHP session cookie, Server/distro) that confirm PHP and
+ *                   hint at the branch, but CANNOT establish the patch level.
  *
- * IMPORTANT CAVEATS (read these before trusting the output):
- *   1. Many hosts set expose_php=Off, so no version is advertised. Then this
- *      tool reports UNKNOWN -- that is not "safe", it just means you must check
- *      another way (php -v over SSH, phpinfo(), or your control panel).
- *   2. Distros (Debian/RHEL/Ubuntu/cPanel/Plesk vendors) backport security
- *      fixes WITHOUT bumping the upstream version string. A box showing
- *      "8.2.20" may well be patched by the vendor. A version-based VULNERABLE
- *      verdict for such a build is only a strong hint -- confirm with the
- *      vendor's package changelog.
- *   3. Only probe hosts you own or are authorized to test.
+ * It sends no payload and triggers neither bug. It only reads banners/markers.
+ *
+ * IMPORTANT CAVEATS (read before trusting the output):
+ *   1. A hidden version yields UNKNOWN + fingerprint. That is not "safe" --
+ *      use the endpoint, php -v over SSH, phpinfo(), or your control panel.
+ *   2. Passive fingerprinting cannot tell a patched point release from an
+ *      unpatched one. No HTTP banner exposes that; only the endpoint or a
+ *      server-side check can.
+ *   3. Distros backport fixes WITHOUT bumping the version string, so a
+ *      header/endpoint "VULNERABLE?" is a strong hint -- confirm the vendor
+ *      package (see php_patch_check_server.sh).
+ *   4. Only probe hosts you own or are authorized to test.
  *
  * Build:
  *     cc -O2 -Wall -Wextra -o php_patch_check php_patch_check.c -lssl -lcrypto
  *
  * Usage:
  *     ./php_patch_check https://example.com https://blog.example.com:8443
- *     ./php_patch_check example.com                # https assumed
+ *     ./php_patch_check example.com                         # https assumed
+ *     ./php_patch_check "https://example.com/vulncheck.php?token=SECRET"
  */
 
 #include <stdio.h>
@@ -128,8 +137,10 @@ static int tcp_connect(const char *host, const char *port)
     return fd;
 }
 
-/* Fetch raw response headers into buf (NUL-terminated). Returns 0 on success. */
-static int fetch_headers(const struct url *u, char *buf, size_t buflen)
+/* Fetch the response (headers + a bounded slice of the body) into buf,
+ * NUL-terminated. The body is needed so we can read a vulncheck.php marker.
+ * Returns 0 on success. */
+static int fetch_response(const struct url *u, char *buf, size_t buflen)
 {
     int fd = tcp_connect(u->host, u->port);
     if (fd < 0) {
@@ -138,8 +149,8 @@ static int fetch_headers(const struct url *u, char *buf, size_t buflen)
     }
 
     char req[2048];
-    /* GET is used (not HEAD) because some servers answer HEAD without the
-     * X-Powered-By header; we stop reading as soon as headers end. */
+    /* GET (not HEAD): some servers omit X-Powered-By on HEAD, and we also want
+     * the body so a deployed vulncheck.php marker can be read. */
     snprintf(req, sizeof(req),
              "GET %s HTTP/1.1\r\n"
              "Host: %s\r\n"
@@ -194,8 +205,7 @@ static int fetch_headers(const struct url *u, char *buf, size_t buflen)
         if (n <= 0) break;
         off += (size_t)n;
         buf[off] = '\0';
-        if (strstr(buf, "\r\n\r\n")) break;       /* headers complete */
-        if (off >= buflen - 1) break;
+        if (off >= buflen - 1) break;             /* buffer full */
     }
     buf[off] = '\0';
     rc = (off > 0) ? 0 : -1;
@@ -234,40 +244,104 @@ static int compare_patch(int maj, int min, int pat)
     return 1;                                        /* branch unknown */
 }
 
+/* Look for a vulncheck.php marker in the response body:
+ *   PHPVULNCHECK version=8.3.6 branch=8.3 verdict=... sapi=fpm-fcgi
+ * On success fills maj/min/pat and (if present) copies the SAPI string.
+ * Returns 1 if a version was parsed from the marker. */
+static int parse_endpoint_marker(const char *resp, int *maj, int *min, int *pat,
+                                 char *sapi, size_t sapilen)
+{
+    const char *m = strstr(resp, "PHPVULNCHECK");
+    if (!m) return 0;
+    const char *v = strstr(m, "version=");
+    if (!v || sscanf(v + 8, "%d.%d.%d", maj, min, pat) != 3) return 0;
+    if (sapi && sapilen) {
+        sapi[0] = '\0';
+        const char *s = strstr(m, "sapi=");
+        if (s) sscanf(s + 5, "%31[^ \r\n]", sapi);
+    }
+    return 1;
+}
+
+/* Print whatever passive signals the response leaks when no version is known.
+ * This can confirm "PHP is here" and hint at the distro, but it CANNOT
+ * determine the patch level -- that is a point-release distinction no banner
+ * exposes. */
+static void fingerprint(const char *resp)
+{
+    int php = 0;
+    /* Session cookie is the strongest "this is PHP" tell. */
+    if (strcasestr(resp, "PHPSESSID")) { php = 1;
+        printf("       - Set-Cookie PHPSESSID present (PHP confirmed)\n"); }
+    if (strcasestr(resp, "X-Powered-By: PHP") || strcasestr(resp, "X-Powered-By:PHP")) {
+        php = 1; printf("       - X-Powered-By names PHP (version suppressed)\n"); }
+
+    /* Server header often leaks the distro, which hints at the vendor whose
+     * backport timeline applies -- useful context, not a verdict. */
+    const char *s = strcasestr(resp, "\nServer:");
+    if (!s && strncasecmp(resp, "Server:", 7) == 0) s = resp - 1;
+    if (s) {
+        char val[160]; val[0] = '\0';
+        sscanf(s + 8, " %159[^\r\n]", val);   /* leading space skips the SP after the colon */
+        if (val[0]) printf("       - Server: %s\n", val);
+    }
+    if (!php)
+        printf("       - no PHP-specific signals seen (reverse proxy/CDN, or not PHP)\n");
+    printf("       -> deploy vulncheck.php for an authoritative answer "
+           "(see README), or check the control panel.\n");
+}
+
+static void report_verdict(const char *raw, int maj, int min, int pat,
+                           const char *source, const char *sapi)
+{
+    char tag[64];
+    if (sapi && sapi[0]) snprintf(tag, sizeof(tag), "PHP %d.%d.%d [%s]", maj, min, pat, sapi);
+    else                 snprintf(tag, sizeof(tag), "PHP %d.%d.%d", maj, min, pat);
+
+    int r = compare_patch(maj, min, pat);
+    if (r < 0)
+        printf("[!] %-38s  VULNERABLE?   %s via %s "
+               "(older than branch fix -- confirm vendor backport)\n",
+               raw, tag, source);
+    else if (r == 0)
+        printf("[+] %-38s  PATCHED       %s via %s\n", raw, tag, source);
+    else
+        printf("[?] %-38s  branch %d.%d not in advisory table (EOL/other) -- "
+               "%s via %s, check vendor\n", raw, maj, min, tag, source);
+}
+
 static void check_one(const char *raw)
 {
     struct url u;
     if (parse_url(raw, &u) != 0) {
-        printf("[?] %-40s  invalid URL\n", raw);
+        printf("[?] %-38s  invalid URL\n", raw);
         return;
     }
 
-    char headers[HDR_BUF];
-    if (fetch_headers(&u, headers, sizeof(headers)) != 0) {
-        printf("[?] %-40s  UNREACHABLE\n", raw);
+    char resp[HDR_BUF];
+    if (fetch_response(&u, resp, sizeof(resp)) != 0) {
+        printf("[?] %-38s  UNREACHABLE\n", raw);
         return;
     }
 
     int maj, min, pat;
-    if (!extract_php_version(headers, &maj, &min, &pat)) {
-        printf("[?] %-40s  UNKNOWN (no PHP version advertised; "
-               "check php -v / phpinfo / control panel)\n", raw);
+    char sapi[32];
+
+    /* 1. Authoritative: a deployed vulncheck.php marker in the body. */
+    if (parse_endpoint_marker(resp, &maj, &min, &pat, sapi, sizeof(sapi))) {
+        report_verdict(raw, maj, min, pat, "endpoint", sapi);
         return;
     }
 
-    int r = compare_patch(maj, min, pat);
-    if (r < 0) {
-        printf("[!] %-40s  VULNERABLE?  reports PHP/%d.%d.%d "
-               "(branch fix is higher) -- confirm vendor backport\n",
-               raw, maj, min, pat);
-    } else if (r == 0) {
-        printf("[+] %-40s  PATCHED       reports PHP/%d.%d.%d\n",
-               raw, maj, min, pat);
-    } else {
-        printf("[?] %-40s  branch %d.%d not in advisory table "
-               "(EOL/other) -- reports PHP/%d.%d.%d, check vendor\n",
-               raw, maj, min, maj, min, pat);
+    /* 2. Advertised banner: X-Powered-By / Server header. */
+    if (extract_php_version(resp, &maj, &min, &pat)) {
+        report_verdict(raw, maj, min, pat, "header", NULL);
+        return;
     }
+
+    /* 3. No version anywhere -- fall back to passive fingerprinting. */
+    printf("[?] %-38s  UNKNOWN (version not disclosed)\n", raw);
+    fingerprint(resp);
 }
 
 int main(int argc, char **argv)
@@ -275,9 +349,12 @@ int main(int argc, char **argv)
     if (argc < 2) {
         fprintf(stderr,
             "Usage: %s <url> [url ...]\n"
-            "  Reads the advertised PHP version and compares it against the\n"
-            "  2026-10-21 advisory fixes (8.5.12 / 8.4.27 / 8.3.36 / 8.2.35).\n"
-            "  Non-destructive: it only reads response headers.\n",
+            "  Reports PHP patch status vs the 2026-10-21 advisory fixes\n"
+            "  (8.5.12 / 8.4.27 / 8.3.36 / 8.2.35) using, in order: a deployed\n"
+            "  vulncheck.php marker, the advertised header version, then passive\n"
+            "  fingerprinting. Non-destructive: it only reads banners/markers.\n"
+            "  For hosts with no shell, deploy vulncheck.php and pass its URL\n"
+            "  including ?token=... (see README).\n",
             argv[0]);
         return 2;
     }
@@ -295,7 +372,9 @@ int main(int argc, char **argv)
         check_one(argv[i]);
 
     printf("------------------------------------------------------------\n");
-    printf("Note: UNKNOWN != safe. Distro backports keep old version\n"
-           "strings, so a VULNERABLE? verdict needs vendor confirmation.\n");
+    printf("Note: UNKNOWN != safe -- fingerprinting cannot read the patch\n"
+           "level. For those hosts deploy vulncheck.php or check server-side.\n"
+           "Distro backports keep old version strings, so a VULNERABLE? verdict\n"
+           "still needs vendor confirmation.\n");
     return 0;
 }

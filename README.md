@@ -1,10 +1,11 @@
 # PHP RCE Patch-Status Tools — CVE-2026-109618 / CVE-2026-109619
 
-Two small, **read-only** tools to confirm whether your PHP installations are
+Three small, **read-only** tools to confirm whether your PHP installations are
 patched against the critical RCE advisory published **2026-10-21** on
-[php.net](https://www.php.net/archive/2026.php).
+[php.net](https://www.php.net/archive/2026.php): a remote probe, an on-server
+check, and a no-shell version endpoint.
 
-Neither tool is an exploit. They do **not** trigger the vulnerabilities and send
+None of them is an exploit. They do **not** trigger the vulnerabilities and send
 no attack payload — they only read version information. The goal is a clean
 "patched / not patched" answer for servers you own or are authorized to test.
 
@@ -39,17 +40,29 @@ installation safe.
 
 ---
 
-## The two tools
+## The tools
 
-### 1. `php_patch_check.c` — network banner probe
+### 1. `php_patch_check.c` — remote probe
 
-A C program that makes one harmless HTTP `GET` per site, reads the PHP version
-advertised in the `X-Powered-By` / `Server` response headers, and compares it
-to the fix table. Use it to **sweep many sites quickly** and find the obvious
-misses.
+A C program that makes one harmless HTTP `GET` per site and determines patch
+status from, in order of preference:
 
-Verdicts per site: `PATCHED`, `VULNERABLE?`, `UNKNOWN` (no version advertised),
-`UNREACHABLE`.
+1. **endpoint** — a `vulncheck.php` marker in the response body (authoritative;
+   see tool 3). This is the answer for **hosting with no shell**.
+2. **header** — the version advertised in `X-Powered-By` / `Server`.
+3. **fingerprint** — when neither is available, passive signals (a `PHPSESSID`
+   cookie, the `Server`/distro banner) that **confirm PHP and hint at the
+   branch but cannot establish the patch level**.
+
+Use it to **sweep many sites quickly**. Verdicts per site: `PATCHED`,
+`VULNERABLE?`, `UNKNOWN` (+ fingerprint), `UNREACHABLE`.
+
+> **Why fingerprinting can't give a verdict.** The fix is a *point release*
+> (e.g. 8.3.36 vs 8.3.35). No HTTP banner exposes that when the version is
+> hidden, and the two bugs are memory-corruption flaws with no safe remote
+> "is it patched?" oracle — the only way to probe them remotely is to attempt
+> the exploit, which risks crashing your workers. So for hidden-version hosts,
+> use the endpoint (tool 3) or a server-side check (tool 2).
 
 ### 2. `php_patch_check_server.sh` — on-server authoritative check
 
@@ -67,6 +80,31 @@ Verdicts per SAPI: `PATCHED`, `LIKELY PATCHED via vendor backport`,
 `VULNERABLE`, `UNKNOWN`.
 Exit code: `0` all clear, `1` a genuine vulnerability found, `2` an unknown
 (with `1` taking precedence) — suitable for cron / monitoring.
+
+### 3. `vulncheck.php` — no-shell version endpoint
+
+For hosting with **no terminal** but where you can still upload files. Drop this
+token-gated PHP file in your own webroot; it prints the **real running PHP
+version** (which the server may hide from its headers) and the verdict. Read it
+with a browser/`curl`, or point `php_patch_check` at its URL to fold it into a
+sweep. **Delete it when done.**
+
+```php
+// 1. set a long random secret inside vulncheck.php:
+$TOKEN = 'CHANGE_ME_TO_A_LONG_RANDOM_STRING';
+```
+```bash
+# 2. generate a token, e.g.:
+php -r "echo bin2hex(random_bytes(16)), PHP_EOL;"
+# 3. upload, then check (404 without the correct token, so it doesn't leak):
+curl "https://example.com/vulncheck.php?token=YOUR_TOKEN"
+./php_patch_check "https://example.com/vulncheck.php?token=YOUR_TOKEN"
+# 4. delete vulncheck.php from the server.
+```
+
+It reports `PHP_VERSION` (the upstream string), so a vendor backport may still
+read `VULNERABLE_BY_VERSION` — confirm the package version with your vendor if
+so.
 
 ---
 
@@ -120,8 +158,12 @@ ssh user@your-server 'sh -s' < php_patch_check_server.sh
 1. Run `php_patch_check` from your machine to sweep all sites and flag anything
    that is not a clean `PATCHED` (expect many `UNKNOWN`s — well-configured hosts
    set `expose_php=Off` and advertise no version).
-2. For each flagged or unknown host, run `php_patch_check_server.sh` on the
-   server for the authoritative answer, including backport detection.
+2. For each flagged or unknown host, get an authoritative answer:
+   - **has a shell:** run `php_patch_check_server.sh` on the server (also
+     detects vendor backports);
+   - **no shell (managed hosting):** upload `vulncheck.php`, read it (directly
+     or via `php_patch_check "<url>?token=..."`), then delete it;
+   - or check the host's control panel / ask the provider.
 3. Update any host that is not patched to the fixed release for its branch (or
    your vendor's fixed package).
 
